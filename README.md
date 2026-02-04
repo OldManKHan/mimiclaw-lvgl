@@ -55,7 +55,7 @@ OpenClaw is powerful — multi-channel messaging, agent runtime, tool ecosystem 
 
 ```bash
 # Clone
-git clone https://github.com/user/mimiclaw.git
+git clone https://github.com/memovai/mimiclaw.git
 cd mimiclaw
 
 # Build with ESP-IDF
