@@ -5,9 +5,34 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <stdarg.h>
 #include "esp_log.h"
 
 static const char *TAG = "memory";
+
+static size_t clamp_offset(size_t offset, size_t size)
+{
+    if (size == 0) return 0;
+    return (offset < size) ? offset : (size - 1);
+}
+
+static size_t append_fmt(char *buf, size_t size, size_t offset, const char *fmt, ...)
+{
+    if (!buf || size == 0 || !fmt) return clamp_offset(offset, size);
+
+    size_t off = clamp_offset(offset, size);
+
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + off, size - off, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) return off;
+
+    size_t avail = size - off - 1;
+    if ((size_t)n > avail) return size - 1;
+    return off + (size_t)n;
+}
 
 static void get_date_str(char *buf, size_t size, int days_ago)
 {
@@ -80,6 +105,8 @@ esp_err_t memory_append_today(const char *note)
 
 esp_err_t memory_read_recent(char *buf, size_t size, int days)
 {
+    if (!buf || size == 0) return ESP_ERR_INVALID_ARG;
+
     size_t offset = 0;
     buf[0] = '\0';
 
@@ -93,13 +120,15 @@ esp_err_t memory_read_recent(char *buf, size_t size, int days)
         FILE *f = fopen(path, "r");
         if (!f) continue;
 
-        if (offset > 0 && offset < size - 4) {
-            offset += snprintf(buf + offset, size - offset, "\n---\n");
+        if (offset > 0) {
+            offset = append_fmt(buf, size, offset, "\n---\n");
         }
 
-        size_t n = fread(buf + offset, 1, size - offset - 1, f);
-        offset += n;
-        buf[offset] = '\0';
+        if (offset < size - 1) {
+            size_t n = fread(buf + offset, 1, size - offset - 1, f);
+            offset += n;
+            buf[offset] = '\0';
+        }
         fclose(f);
     }
 

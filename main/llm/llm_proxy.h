@@ -13,19 +13,26 @@
 esp_err_t llm_proxy_init(void);
 
 /**
- * Save the LLM API key to NVS.
+ * Save the Anthropic API key to NVS.
  */
 esp_err_t llm_set_api_key(const char *api_key);
-
-/**
- * Save the LLM provider to NVS. (e.g. "anthropic", "openai")
- */
-esp_err_t llm_set_provider(const char *provider);
 
 /**
  * Save the model identifier to NVS.
  */
 esp_err_t llm_set_model(const char *model);
+
+/**
+ * Send a chat completion request to Anthropic Messages API (streaming).
+ *
+ * @param system_prompt  System prompt string
+ * @param messages_json  JSON array of messages: [{"role":"user","content":"..."},...]
+ * @param response_buf   Output buffer for the complete response text
+ * @param buf_size       Size of response_buf
+ * @return ESP_OK on success
+ */
+esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
+                   char *response_buf, size_t buf_size);
 
 /* ── Tool Use Support ──────────────────────────────────────────── */
 
@@ -39,6 +46,7 @@ typedef struct {
 typedef struct {
     char *text;                                  /* accumulated text blocks */
     size_t text_len;
+    cJSON *assistant_content;                    /* full assistant content array from API */
     llm_tool_call_t calls[MIMI_MAX_TOOL_CALLS];
     int call_count;
     bool tool_use;                               /* stop_reason == "tool_use" */
@@ -47,7 +55,7 @@ typedef struct {
 void llm_response_free(llm_response_t *resp);
 
 /**
- * Send a chat completion request with tools to the configured LLM API (non-streaming).
+ * Send a chat completion request with tools to Anthropic Messages API (streaming).
  *
  * @param system_prompt  System prompt string
  * @param messages       cJSON array of messages (caller owns)

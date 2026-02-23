@@ -1,21 +1,18 @@
 #include "serial_cli.h"
 #include "mimi_config.h"
+#include "bus/message_bus.h"
 #include "wifi/wifi_manager.h"
 #include "telegram/telegram_bot.h"
+#include "feishu/feishu_bot.h"
 #include "llm/llm_proxy.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
 #include "proxy/http_proxy.h"
-#include "tools/tool_registry.h"
 #include "tools/tool_web_search.h"
-#include "cron/cron_service.h"
-#include "heartbeat/heartbeat.h"
-#include "skills/skill_loader.h"
 
 #include <string.h>
 #include <stdio.h>
-#include <ctype.h>
-#include <dirent.h>
+#include <stdlib.h>
 #include "esp_log.h"
 #include "esp_console.h"
 #include "esp_system.h"
@@ -72,6 +69,153 @@ static int cmd_set_tg_token(int argc, char **argv)
     return 0;
 }
 
+/* --- set_feishu_webhook command --- */
+static struct {
+    struct arg_str *url;
+    struct arg_end *end;
+} feishu_webhook_args;
+
+static int cmd_set_feishu_webhook(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_webhook_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_webhook_args.end, argv[0]);
+        return 1;
+    }
+    feishu_bot_set_webhook(feishu_webhook_args.url->sval[0]);
+    printf("Feishu webhook saved.\n");
+    return 0;
+}
+
+/* --- set_feishu_app command --- */
+static struct {
+    struct arg_str *app_id;
+    struct arg_str *app_secret;
+    struct arg_end *end;
+} feishu_app_args;
+
+static int cmd_set_feishu_app(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_app_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_app_args.end, argv[0]);
+        return 1;
+    }
+    esp_err_t ret = feishu_bot_set_app_credentials(feishu_app_args.app_id->sval[0],
+                                                    feishu_app_args.app_secret->sval[0]);
+    if (ret == ESP_OK) {
+        feishu_bot_start();
+    }
+    printf("Feishu app config: %s\n", ret == ESP_OK ? "saved" : "failed");
+    return ret == ESP_OK ? 0 : 1;
+}
+
+/* --- clear_feishu_app command --- */
+static int cmd_clear_feishu_app(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    esp_err_t ret = feishu_bot_clear_app_credentials();
+    printf("Feishu app config: %s\n", ret == ESP_OK ? "cleared" : "failed");
+    return ret == ESP_OK ? 0 : 1;
+}
+
+/* --- set_feishu_chat command --- */
+static struct {
+    struct arg_str *chat_id;
+    struct arg_end *end;
+} feishu_chat_id_args;
+
+static int cmd_set_feishu_chat(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_chat_id_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_chat_id_args.end, argv[0]);
+        return 1;
+    }
+    esp_err_t ret = feishu_bot_set_default_chat_id(feishu_chat_id_args.chat_id->sval[0]);
+    printf("Feishu default chat_id: %s\n", ret == ESP_OK ? "saved" : "failed");
+    return ret == ESP_OK ? 0 : 1;
+}
+
+/* --- clear_feishu_chat command --- */
+static int cmd_clear_feishu_chat(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    esp_err_t ret = feishu_bot_clear_default_chat_id();
+    printf("Feishu default chat_id: %s\n", ret == ESP_OK ? "cleared" : "failed");
+    return ret == ESP_OK ? 0 : 1;
+}
+
+/* --- clear_feishu_webhook command --- */
+static int cmd_clear_feishu_webhook(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    feishu_bot_clear_webhook();
+    printf("Feishu webhook cleared.\n");
+    return 0;
+}
+
+/* --- feishu_send command --- */
+static struct {
+    struct arg_str *chat_id;
+    struct arg_str *text;
+    struct arg_end *end;
+} feishu_send_args;
+
+static int cmd_feishu_send(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_send_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_send_args.end, argv[0]);
+        return 1;
+    }
+    esp_err_t ret = feishu_bot_send_message_to(feishu_send_args.chat_id->sval[0],
+                                               feishu_send_args.text->sval[0]);
+    printf("Feishu send: %s\n", ret == ESP_OK ? "ok" : "failed");
+    return ret == ESP_OK ? 0 : 1;
+}
+
+/* --- feishu_chat command --- */
+static struct {
+    struct arg_str *text;
+    struct arg_end *end;
+} feishu_chat_args;
+
+static int cmd_feishu_chat(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&feishu_chat_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, feishu_chat_args.end, argv[0]);
+        return 1;
+    }
+
+    mimi_msg_t msg = {0};
+    const char *chat_id = feishu_bot_get_default_chat_id();
+    if (!chat_id || !chat_id[0]) {
+        chat_id = "feishu_default";
+    }
+    strncpy(msg.channel, MIMI_CHAN_FEISHU, sizeof(msg.channel) - 1);
+    strncpy(msg.chat_id, chat_id, sizeof(msg.chat_id) - 1);
+    msg.content = strdup(feishu_chat_args.text->sval[0]);
+    if (!msg.content) {
+        printf("Out of memory.\n");
+        return 1;
+    }
+
+    esp_err_t ret = message_bus_push_inbound(&msg);
+    if (ret != ESP_OK) {
+        free(msg.content);
+        printf("Queue full.\n");
+        return 1;
+    }
+
+    printf("Queued message to agent (channel=feishu).\n");
+    return 0;
+}
+
 /* --- set_api_key command --- */
 static struct {
     struct arg_str *key;
@@ -105,24 +249,6 @@ static int cmd_set_model(int argc, char **argv)
     }
     llm_set_model(model_args.model->sval[0]);
     printf("Model set.\n");
-    return 0;
-}
-
-/* --- set_model_provider command --- */
-static struct {
-    struct arg_str *provider;
-    struct arg_end *end;
-} provider_args;
-
-static int cmd_set_model_provider(int argc, char **argv)
-{
-    int nerrors = arg_parse(argc, argv, (void **)&provider_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, provider_args.end, argv[0]);
-        return 1;
-    }
-    llm_set_provider(provider_args.provider->sval[0]);
-    printf("Model provider set.\n");
     return 0;
 }
 
@@ -247,182 +373,6 @@ static int cmd_set_search_key(int argc, char **argv)
     return 0;
 }
 
-/* --- wifi_scan command --- */
-static int cmd_wifi_scan(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-    wifi_manager_scan_and_print();
-    return 0;
-}
-
-/* --- skill_list command --- */
-static int cmd_skill_list(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-
-    char *buf = malloc(4096);
-    if (!buf) {
-        printf("Out of memory.\n");
-        return 1;
-    }
-
-    size_t n = skill_loader_build_summary(buf, 4096);
-    if (n == 0) {
-        printf("No skills found under /spiffs/skills/.\n");
-    } else {
-        printf("=== Skills ===\n%s", buf);
-    }
-    free(buf);
-    return 0;
-}
-
-/* --- skill_show command --- */
-static struct {
-    struct arg_str *name;
-    struct arg_end *end;
-} skill_show_args;
-
-static bool has_md_suffix(const char *name)
-{
-    size_t len = strlen(name);
-    return (len >= 3) && strcmp(name + len - 3, ".md") == 0;
-}
-
-static bool build_skill_path(const char *name, char *out, size_t out_size)
-{
-    if (!name || !name[0]) return false;
-    if (strstr(name, "..") != NULL) return false;
-    if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL) return false;
-
-    if (has_md_suffix(name)) {
-        snprintf(out, out_size, "/spiffs/skills/%s", name);
-    } else {
-        snprintf(out, out_size, "/spiffs/skills/%s.md", name);
-    }
-    return true;
-}
-
-static int cmd_skill_show(int argc, char **argv)
-{
-    int nerrors = arg_parse(argc, argv, (void **)&skill_show_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, skill_show_args.end, argv[0]);
-        return 1;
-    }
-
-    char path[128];
-    if (!build_skill_path(skill_show_args.name->sval[0], path, sizeof(path))) {
-        printf("Invalid skill name.\n");
-        return 1;
-    }
-
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        printf("Skill not found: %s\n", path);
-        return 1;
-    }
-
-    printf("=== %s ===\n", path);
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        fputs(line, stdout);
-    }
-    fclose(f);
-    printf("\n============\n");
-    return 0;
-}
-
-/* --- skill_search command --- */
-static struct {
-    struct arg_str *keyword;
-    struct arg_end *end;
-} skill_search_args;
-
-static bool contains_nocase(const char *text, const char *keyword)
-{
-    if (!text || !keyword || !keyword[0]) return false;
-
-    size_t key_len = strlen(keyword);
-    for (const char *p = text; *p; p++) {
-        size_t i = 0;
-        while (i < key_len && p[i] &&
-               tolower((unsigned char)p[i]) == tolower((unsigned char)keyword[i])) {
-            i++;
-        }
-        if (i == key_len) return true;
-    }
-    return false;
-}
-
-static int cmd_skill_search(int argc, char **argv)
-{
-    int nerrors = arg_parse(argc, argv, (void **)&skill_search_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, skill_search_args.end, argv[0]);
-        return 1;
-    }
-
-    const char *keyword = skill_search_args.keyword->sval[0];
-    DIR *dir = opendir("/spiffs");
-    if (!dir) {
-        printf("Cannot open /spiffs.\n");
-        return 1;
-    }
-
-    const char *prefix = "skills/";
-    const size_t prefix_len = strlen(prefix);
-    int matches = 0;
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        const char *name = ent->d_name;
-        size_t name_len = strlen(name);
-
-        if (strncmp(name, prefix, prefix_len) != 0) continue;
-        if (name_len < prefix_len + 4) continue;
-        if (strcmp(name + name_len - 3, ".md") != 0) continue;
-
-        char full_path[296];
-        snprintf(full_path, sizeof(full_path), "/spiffs/%s", name);
-
-        bool file_matched = contains_nocase(name, keyword);
-        int matched_line = 0;
-
-        FILE *f = fopen(full_path, "r");
-        if (!f) continue;
-
-        char line[256];
-        int line_no = 0;
-        while (!file_matched && fgets(line, sizeof(line), f)) {
-            line_no++;
-            if (contains_nocase(line, keyword)) {
-                file_matched = true;
-                matched_line = line_no;
-            }
-        }
-        fclose(f);
-
-        if (file_matched) {
-            matches++;
-            if (matched_line > 0) {
-                printf("- %s (matched at line %d)\n", full_path, matched_line);
-            } else {
-                printf("- %s (matched in filename)\n", full_path);
-            }
-        }
-    }
-
-    closedir(dir);
-    if (matches == 0) {
-        printf("No skills matched keyword: %s\n", keyword);
-    } else {
-        printf("Total matches: %d\n", matches);
-    }
-    return 0;
-}
-
 /* --- config_show command --- */
 static void print_config(const char *label, const char *ns, const char *key,
                          const char *build_val, bool mask)
@@ -463,10 +413,13 @@ static int cmd_config_show(int argc, char **argv)
     print_config("TG Token",   MIMI_NVS_TG,     MIMI_NVS_KEY_TG_TOKEN, MIMI_SECRET_TG_TOKEN,   true);
     print_config("API Key",    MIMI_NVS_LLM,    MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_API_KEY,    true);
     print_config("Model",      MIMI_NVS_LLM,    MIMI_NVS_KEY_MODEL,    MIMI_SECRET_MODEL,      false);
-    print_config("Provider",   MIMI_NVS_LLM,    MIMI_NVS_KEY_PROVIDER, MIMI_SECRET_MODEL_PROVIDER, false);
     print_config("Proxy Host", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_HOST, MIMI_SECRET_PROXY_HOST, false);
     print_config("Proxy Port", MIMI_NVS_PROXY,  MIMI_NVS_KEY_PROXY_PORT, MIMI_SECRET_PROXY_PORT, false);
     print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,  MIMI_SECRET_SEARCH_KEY, true);
+    print_config("Feishu Hook", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_WEBHOOK, MIMI_SECRET_FEISHU_WEBHOOK, true);
+    print_config("Feishu AppID", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_ID, MIMI_SECRET_FEISHU_APP_ID, true);
+    print_config("Feishu Secret", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_APP_SECRET, MIMI_SECRET_FEISHU_APP_SECRET, true);
+    print_config("Feishu ChatID", MIMI_NVS_FEISHU, MIMI_NVS_KEY_FEISHU_DEF_CHAT, MIMI_SECRET_FEISHU_DEFAULT_CHAT_ID, false);
     printf("=============================\n");
     return 0;
 }
@@ -475,9 +428,9 @@ static int cmd_config_show(int argc, char **argv)
 static int cmd_config_reset(int argc, char **argv)
 {
     const char *namespaces[] = {
-        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH
+        MIMI_NVS_WIFI, MIMI_NVS_TG, MIMI_NVS_LLM, MIMI_NVS_PROXY, MIMI_NVS_SEARCH, MIMI_NVS_FEISHU
     };
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         nvs_handle_t nvs;
         if (nvs_open(namespaces[i], NVS_READWRITE, &nvs) == ESP_OK) {
             nvs_erase_all(nvs);
@@ -487,54 +440,6 @@ static int cmd_config_reset(int argc, char **argv)
     }
     printf("All NVS config cleared. Build-time defaults will be used on restart.\n");
     return 0;
-}
-
-/* --- heartbeat_trigger command --- */
-static int cmd_heartbeat_trigger(int argc, char **argv)
-{
-    printf("Checking HEARTBEAT.md...\n");
-    if (heartbeat_trigger()) {
-        printf("Heartbeat: agent prompted with pending tasks.\n");
-    } else {
-        printf("Heartbeat: no actionable tasks found.\n");
-    }
-    return 0;
-}
-
-/* --- cron_start command --- */
-static int cmd_cron_start(int argc, char **argv)
-{
-    esp_err_t err = cron_service_start();
-    if (err == ESP_OK) {
-        printf("Cron service started.\n");
-        return 0;
-    }
-
-    printf("Failed to start cron service: %s\n", esp_err_to_name(err));
-    return 1;
-}
-
-static int cmd_tool_exec(int argc, char **argv)
-{
-    if (argc < 2) {
-        printf("Usage: tool_exec <name> [json]\n");
-        return 1;
-    }
-
-    const char *tool_name = argv[1];
-    const char *input_json = (argc >= 3) ? argv[2] : "{}";
-
-    char *output = calloc(1, 4096);
-    if (!output) {
-        printf("Out of memory.\n");
-        return 1;
-    }
-
-    esp_err_t err = tool_registry_execute(tool_name, input_json, output, 4096);
-    printf("tool_exec status: %s\n", esp_err_to_name(err));
-    printf("%s\n", output[0] ? output : "(empty)");
-    free(output);
-    return (err == ESP_OK) ? 0 : 1;
 }
 
 /* --- restart command --- */
@@ -552,31 +457,22 @@ esp_err_t serial_cli_init(void)
     repl_config.prompt = "mimi> ";
     repl_config.max_cmdline_length = 256;
 
-#if CONFIG_ESP_CONSOLE_UART_DEFAULT || CONFIG_ESP_CONSOLE_UART_CUSTOM
-    esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_uart(&hw_config, &repl_config, &repl));
-#elif CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    /* USB Serial JTAG */
     esp_console_dev_usb_serial_jtag_config_t hw_config =
         ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
+
     ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl));
-#elif CONFIG_ESP_CONSOLE_USB_CDC
-    esp_console_dev_usb_cdc_config_t hw_config = ESP_CONSOLE_DEV_CDC_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_cdc(&hw_config, &repl_config, &repl));
-#else
-    ESP_LOGE(TAG, "No supported console backend is enabled");
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
 
     /* Register commands */
     esp_console_register_help_command();
 
-    /* set_wifi */
+    /* wifi_set */
     wifi_set_args.ssid = arg_str1(NULL, NULL, "<ssid>", "WiFi SSID");
     wifi_set_args.password = arg_str1(NULL, NULL, "<password>", "WiFi password");
     wifi_set_args.end = arg_end(2);
     esp_console_cmd_t wifi_set_cmd = {
-        .command = "set_wifi",
-        .help = "Set WiFi SSID and password (e.g. set_wifi MySSID MyPass)",
+        .command = "wifi_set",
+        .help = "Set WiFi SSID and password",
         .func = &cmd_wifi_set,
         .argtable = &wifi_set_args,
     };
@@ -590,14 +486,6 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&wifi_status_cmd);
 
-    /* wifi_scan */
-    esp_console_cmd_t wifi_scan_cmd = {
-        .command = "wifi_scan",
-        .help = "Scan and list nearby WiFi APs",
-        .func = &cmd_wifi_scan,
-    };
-    esp_console_cmd_register(&wifi_scan_cmd);
-
     /* set_tg_token */
     tg_token_args.token = arg_str1(NULL, NULL, "<token>", "Telegram bot token");
     tg_token_args.end = arg_end(1);
@@ -609,12 +497,93 @@ esp_err_t serial_cli_init(void)
     };
     esp_console_cmd_register(&tg_token_cmd);
 
+    /* set_feishu_webhook */
+    feishu_webhook_args.url = arg_str1(NULL, NULL, "<url>", "Feishu custom bot webhook URL");
+    feishu_webhook_args.end = arg_end(1);
+    esp_console_cmd_t feishu_webhook_cmd = {
+        .command = "set_feishu_webhook",
+        .help = "Set Feishu custom bot webhook",
+        .func = &cmd_set_feishu_webhook,
+        .argtable = &feishu_webhook_args,
+    };
+    esp_console_cmd_register(&feishu_webhook_cmd);
+
+    /* set_feishu_app */
+    feishu_app_args.app_id = arg_str1(NULL, NULL, "<app_id>", "Feishu app id");
+    feishu_app_args.app_secret = arg_str1(NULL, NULL, "<app_secret>", "Feishu app secret");
+    feishu_app_args.end = arg_end(2);
+    esp_console_cmd_t feishu_app_cmd = {
+        .command = "set_feishu_app",
+        .help = "Set Feishu app credentials for long connection",
+        .func = &cmd_set_feishu_app,
+        .argtable = &feishu_app_args,
+    };
+    esp_console_cmd_register(&feishu_app_cmd);
+
+    /* clear_feishu_app */
+    esp_console_cmd_t clear_feishu_app_cmd = {
+        .command = "clear_feishu_app",
+        .help = "Clear Feishu app credentials",
+        .func = &cmd_clear_feishu_app,
+    };
+    esp_console_cmd_register(&clear_feishu_app_cmd);
+
+    /* set_feishu_chat */
+    feishu_chat_id_args.chat_id = arg_str1(NULL, NULL, "<chat_id>", "Default Feishu chat_id for test sends");
+    feishu_chat_id_args.end = arg_end(1);
+    esp_console_cmd_t feishu_chat_id_cmd = {
+        .command = "set_feishu_chat",
+        .help = "Set default Feishu chat_id",
+        .func = &cmd_set_feishu_chat,
+        .argtable = &feishu_chat_id_args,
+    };
+    esp_console_cmd_register(&feishu_chat_id_cmd);
+
+    /* clear_feishu_chat */
+    esp_console_cmd_t clear_feishu_chat_cmd = {
+        .command = "clear_feishu_chat",
+        .help = "Clear default Feishu chat_id",
+        .func = &cmd_clear_feishu_chat,
+    };
+    esp_console_cmd_register(&clear_feishu_chat_cmd);
+
+    /* clear_feishu_webhook */
+    esp_console_cmd_t clear_feishu_cmd = {
+        .command = "clear_feishu_webhook",
+        .help = "Clear Feishu custom bot webhook",
+        .func = &cmd_clear_feishu_webhook,
+    };
+    esp_console_cmd_register(&clear_feishu_cmd);
+
+    /* feishu_send */
+    feishu_send_args.chat_id = arg_str1(NULL, NULL, "<chat_id>", "Feishu chat_id");
+    feishu_send_args.text = arg_str1(NULL, NULL, "<text>", "Text message to send to Feishu");
+    feishu_send_args.end = arg_end(2);
+    esp_console_cmd_t feishu_send_cmd = {
+        .command = "feishu_send",
+        .help = "Send a test text message via Feishu im/v1/messages",
+        .func = &cmd_feishu_send,
+        .argtable = &feishu_send_args,
+    };
+    esp_console_cmd_register(&feishu_send_cmd);
+
+    /* feishu_chat */
+    feishu_chat_args.text = arg_str1(NULL, NULL, "<text>", "Ask agent then send response to Feishu");
+    feishu_chat_args.end = arg_end(1);
+    esp_console_cmd_t feishu_chat_cmd = {
+        .command = "feishu_chat",
+        .help = "Push a feishu-channel inbound message to agent loop",
+        .func = &cmd_feishu_chat,
+        .argtable = &feishu_chat_args,
+    };
+    esp_console_cmd_register(&feishu_chat_cmd);
+
     /* set_api_key */
-    api_key_args.key = arg_str1(NULL, NULL, "<key>", "LLM API key");
+    api_key_args.key = arg_str1(NULL, NULL, "<key>", "Anthropic API key");
     api_key_args.end = arg_end(1);
     esp_console_cmd_t api_key_cmd = {
         .command = "set_api_key",
-        .help = "Set LLM API key",
+        .help = "Set Claude API key",
         .func = &cmd_set_api_key,
         .argtable = &api_key_args,
     };
@@ -630,47 +599,6 @@ esp_err_t serial_cli_init(void)
         .argtable = &model_args,
     };
     esp_console_cmd_register(&model_cmd);
-
-    /* set_model_provider */
-    provider_args.provider = arg_str1(NULL, NULL, "<provider>", "Model provider (anthropic|openai)");
-    provider_args.end = arg_end(1);
-    esp_console_cmd_t provider_cmd = {
-        .command = "set_model_provider",
-        .help = "Set LLM model provider (default: " MIMI_LLM_PROVIDER_DEFAULT ")",
-        .func = &cmd_set_model_provider,
-        .argtable = &provider_args,
-    };
-    esp_console_cmd_register(&provider_cmd);
-
-    /* skill_list */
-    esp_console_cmd_t skill_list_cmd = {
-        .command = "skill_list",
-        .help = "List installed skills from /spiffs/skills/",
-        .func = &cmd_skill_list,
-    };
-    esp_console_cmd_register(&skill_list_cmd);
-
-    /* skill_show */
-    skill_show_args.name = arg_str1(NULL, NULL, "<name>", "Skill name (e.g. weather or weather.md)");
-    skill_show_args.end = arg_end(1);
-    esp_console_cmd_t skill_show_cmd = {
-        .command = "skill_show",
-        .help = "Print full content of one skill file",
-        .func = &cmd_skill_show,
-        .argtable = &skill_show_args,
-    };
-    esp_console_cmd_register(&skill_show_cmd);
-
-    /* skill_search */
-    skill_search_args.keyword = arg_str1(NULL, NULL, "<keyword>", "Keyword to search in skills");
-    skill_search_args.end = arg_end(1);
-    esp_console_cmd_t skill_search_cmd = {
-        .command = "skill_search",
-        .help = "Search skill files by keyword (filename + content)",
-        .func = &cmd_skill_search,
-        .argtable = &skill_search_args,
-    };
-    esp_console_cmd_register(&skill_search_cmd);
 
     /* memory_read */
     esp_console_cmd_t mem_read_cmd = {
@@ -764,30 +692,6 @@ esp_err_t serial_cli_init(void)
         .func = &cmd_config_reset,
     };
     esp_console_cmd_register(&config_reset_cmd);
-
-    /* heartbeat_trigger */
-    esp_console_cmd_t heartbeat_cmd = {
-        .command = "heartbeat_trigger",
-        .help = "Manually trigger a heartbeat check",
-        .func = &cmd_heartbeat_trigger,
-    };
-    esp_console_cmd_register(&heartbeat_cmd);
-
-    /* cron_start */
-    esp_console_cmd_t cron_start_cmd = {
-        .command = "cron_start",
-        .help = "Start cron scheduler timer now",
-        .func = &cmd_cron_start,
-    };
-    esp_console_cmd_register(&cron_start_cmd);
-
-    /* tool_exec */
-    esp_console_cmd_t tool_exec_cmd = {
-        .command = "tool_exec",
-        .help = "Execute a registered tool: tool_exec <name> '{...json...}'",
-        .func = &cmd_tool_exec,
-    };
-    esp_console_cmd_register(&tool_exec_cmd);
 
     /* restart */
     esp_console_cmd_t restart_cmd = {

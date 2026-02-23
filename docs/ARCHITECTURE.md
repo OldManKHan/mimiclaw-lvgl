@@ -47,7 +47,7 @@ Telegram App (User)
 │                     sendMessage  send              │
 │                                                   │
 │   ┌──────────────────────────────────────────┐    │
-│   │  SPIFFS (12 MB)                          │    │
+│   │  SPIFFS (3.8 MB)                         │    │
 │   │  /spiffs/config/  SOUL.md, USER.md       │    │
 │   │  /spiffs/memory/  MEMORY.md, YYYY-MM-DD  │    │
 │   │  /spiffs/sessions/ tg_<chat_id>.jsonl    │    │
@@ -195,11 +195,11 @@ Offset      Size      Name        Purpose
 0x011000     4 KB     phy_init    WiFi PHY calibration
 0x020000     2 MB     ota_0       Firmware slot A
 0x220000     2 MB     ota_1       Firmware slot B
-0x420000    12 MB     spiffs      Markdown memory, sessions, config
-0xFF0000    64 KB     coredump    Crash dump storage
+0x420000     3.8 MB   spiffs      Markdown memory, sessions, config
+0x7F0000    64 KB     coredump    Crash dump storage
 ```
 
-Total: 16 MB flash.
+Total: 8 MB flash.
 
 ---
 

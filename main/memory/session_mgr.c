@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <dirent.h>
 #include <time.h>
 #include "esp_log.h"
@@ -11,9 +12,35 @@
 
 static const char *TAG = "session";
 
+static uint32_t fnv1a_32(const char *s)
+{
+    uint32_t h = 2166136261u;
+    if (!s) return h;
+    for (; *s; ++s) {
+        h ^= (uint8_t)(*s);
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void session_relpath(const char *chat_id, char *buf, size_t size)
+{
+    const char *id = chat_id ? chat_id : "";
+    int n = snprintf(buf, size, "sessions/tg_%s.jsonl", id);
+    if (n > 0 && (size_t)n < size && n < CONFIG_SPIFFS_OBJ_NAME_LEN) {
+        return;
+    }
+
+    /* SPIFFS object-name limit is small (CONFIG_SPIFFS_OBJ_NAME_LEN), hash long ids. */
+    uint32_t h = fnv1a_32(id);
+    snprintf(buf, size, "sessions/tg_%08lx.jsonl", (unsigned long)h);
+}
+
 static void session_path(const char *chat_id, char *buf, size_t size)
 {
-    snprintf(buf, size, "%s/tg_%s.jsonl", MIMI_SPIFFS_SESSION_DIR, chat_id);
+    char rel[48];
+    session_relpath(chat_id, rel, sizeof(rel));
+    snprintf(buf, size, "%s/%s", MIMI_SPIFFS_BASE, rel);
 }
 
 esp_err_t session_mgr_init(void)
@@ -52,6 +79,10 @@ esp_err_t session_append(const char *chat_id, const char *role, const char *cont
 
 esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs)
 {
+    if (!buf || size == 0) return ESP_ERR_INVALID_ARG;
+    if (max_msgs <= 0) max_msgs = 1;
+    if (max_msgs > MIMI_SESSION_MAX_MSGS) max_msgs = MIMI_SESSION_MAX_MSGS;
+
     char path[64];
     session_path(chat_id, path, sizeof(path));
 
