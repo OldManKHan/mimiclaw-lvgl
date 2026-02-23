@@ -41,6 +41,12 @@ static const char *TAG = "feishu";
 #define FEISHU_WS_PAYLOAD_MAX                 (96 * 1024)
 #define FEISHU_EVENT_DEDUP_MAX                2048
 #define FEISHU_EVENT_DEDUP_EXPIRE_MS          (24 * 60 * 60 * 1000)
+#define FEISHU_EVENT_DEDUP_FLUSH_INTERVAL_MS  5000
+#define FEISHU_EVENT_DEDUP_FLUSH_WRITES       16
+#define FEISHU_EVENT_DEDUP_MAGIC              0x46444450u /* FDDP */
+#define FEISHU_EVENT_DEDUP_FILE_VERSION       1
+#define FEISHU_EVENT_DEDUP_FILE               MIMI_SPIFFS_BASE "/feishu_dedup.bin"
+#define FEISHU_EVENT_DEDUP_FILE_TMP           MIMI_SPIFFS_BASE "/feishu_dedup.bin.tmp"
 
 #define FEISHU_EVENT_IM_RECEIVE               "im.message.receive_v1"
 #define FEISHU_MSG_TYPE_TEXT                  "text"
@@ -93,6 +99,19 @@ typedef struct {
     int64_t ts_ms;
 } event_dedup_t;
 
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t count;
+} dedup_file_header_t;
+
+typedef struct {
+    uint8_t used;
+    int64_t ts_ms;
+    char key[96];
+} dedup_file_entry_t;
+
 static char s_webhook_url[320] = MIMI_SECRET_FEISHU_WEBHOOK;
 static char s_app_id[96] = MIMI_SECRET_FEISHU_APP_ID;
 static char s_app_secret[128] = MIMI_SECRET_FEISHU_APP_SECRET;
@@ -118,6 +137,9 @@ static uint8_t s_ws_read_buf[4096];
 
 static chunk_cache_t s_chunk_cache[FEISHU_CHUNK_CACHE_MAX];
 static event_dedup_t *s_event_dedup = NULL;
+static bool s_event_dedup_dirty = false;
+static uint16_t s_event_dedup_dirty_writes = 0;
+static int64_t s_event_dedup_last_flush_ms = 0;
 
 static void str_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -148,21 +170,156 @@ static uint32_t fnv1a32_str(const char *s)
     return h;
 }
 
+static void event_dedup_mark_dirty(void)
+{
+    s_event_dedup_dirty = true;
+    if (s_event_dedup_dirty_writes < UINT16_MAX) {
+        s_event_dedup_dirty_writes++;
+    }
+}
+
+static esp_err_t event_dedup_save_to_disk(void)
+{
+    if (!s_event_dedup) return ESP_ERR_INVALID_STATE;
+
+    FILE *f = fopen(FEISHU_EVENT_DEDUP_FILE_TMP, "wb");
+    if (!f) {
+        return ESP_FAIL;
+    }
+
+    dedup_file_header_t header = {
+        .magic = FEISHU_EVENT_DEDUP_MAGIC,
+        .version = FEISHU_EVENT_DEDUP_FILE_VERSION,
+        .reserved = 0,
+        .count = FEISHU_EVENT_DEDUP_MAX,
+    };
+    if (fwrite(&header, sizeof(header), 1, f) != 1) {
+        fclose(f);
+        remove(FEISHU_EVENT_DEDUP_FILE_TMP);
+        return ESP_FAIL;
+    }
+
+    for (int i = 0; i < FEISHU_EVENT_DEDUP_MAX; i++) {
+        dedup_file_entry_t entry = {0};
+        entry.used = s_event_dedup[i].used ? 1 : 0;
+        entry.ts_ms = s_event_dedup[i].ts_ms;
+        str_copy(entry.key, sizeof(entry.key), s_event_dedup[i].key);
+        if (fwrite(&entry, sizeof(entry), 1, f) != 1) {
+            fclose(f);
+            remove(FEISHU_EVENT_DEDUP_FILE_TMP);
+            return ESP_FAIL;
+        }
+    }
+
+    if (fclose(f) != 0) {
+        remove(FEISHU_EVENT_DEDUP_FILE_TMP);
+        return ESP_FAIL;
+    }
+
+    remove(FEISHU_EVENT_DEDUP_FILE);
+    if (rename(FEISHU_EVENT_DEDUP_FILE_TMP, FEISHU_EVENT_DEDUP_FILE) != 0) {
+        remove(FEISHU_EVENT_DEDUP_FILE_TMP);
+        return ESP_FAIL;
+    }
+
+    s_event_dedup_dirty = false;
+    s_event_dedup_dirty_writes = 0;
+    s_event_dedup_last_flush_ms = now_ms();
+    return ESP_OK;
+}
+
+static void event_dedup_maybe_flush(bool force)
+{
+    if (!s_event_dedup || !s_event_dedup_dirty) return;
+
+    int64_t t = now_ms();
+    bool enough_writes = s_event_dedup_dirty_writes >= FEISHU_EVENT_DEDUP_FLUSH_WRITES;
+    bool time_due = (t - s_event_dedup_last_flush_ms) >= FEISHU_EVENT_DEDUP_FLUSH_INTERVAL_MS;
+
+    if (!force && !enough_writes && !time_due) {
+        return;
+    }
+
+    esp_err_t err = event_dedup_save_to_disk();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Dedup cache flush failed: %s", esp_err_to_name(err));
+    }
+}
+
+static esp_err_t event_dedup_load_from_disk(void)
+{
+    if (!s_event_dedup) return ESP_ERR_INVALID_STATE;
+
+    FILE *f = fopen(FEISHU_EVENT_DEDUP_FILE, "rb");
+    if (!f) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    dedup_file_header_t header = {0};
+    if (fread(&header, sizeof(header), 1, f) != 1) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+    if (header.magic != FEISHU_EVENT_DEDUP_MAGIC ||
+        header.version != FEISHU_EVENT_DEDUP_FILE_VERSION ||
+        header.count != FEISHU_EVENT_DEDUP_MAX) {
+        fclose(f);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    memset(s_event_dedup, 0, FEISHU_EVENT_DEDUP_MAX * sizeof(event_dedup_t));
+    for (int i = 0; i < FEISHU_EVENT_DEDUP_MAX; i++) {
+        dedup_file_entry_t entry = {0};
+        if (fread(&entry, sizeof(entry), 1, f) != 1) {
+            fclose(f);
+            return ESP_FAIL;
+        }
+        s_event_dedup[i].used = (entry.used != 0);
+        s_event_dedup[i].ts_ms = entry.ts_ms;
+        str_copy(s_event_dedup[i].key, sizeof(s_event_dedup[i].key), entry.key);
+    }
+    fclose(f);
+
+    int64_t t = now_ms();
+    int expired = 0;
+    for (int i = 0; i < FEISHU_EVENT_DEDUP_MAX; i++) {
+        event_dedup_t *slot = &s_event_dedup[i];
+        if (!slot->used) continue;
+        if (t - slot->ts_ms > FEISHU_EVENT_DEDUP_EXPIRE_MS) {
+            memset(slot, 0, sizeof(*slot));
+            expired++;
+        }
+    }
+    if (expired > 0) {
+        event_dedup_mark_dirty();
+    }
+
+    return ESP_OK;
+}
+
 static bool event_dedup_contains(const char *key)
 {
     if (!s_event_dedup || !key || !key[0]) return false;
     int64_t t = now_ms();
+    bool changed = false;
 
     for (int i = 0; i < FEISHU_EVENT_DEDUP_MAX; i++) {
         event_dedup_t *slot = &s_event_dedup[i];
         if (!slot->used) continue;
         if (t - slot->ts_ms > FEISHU_EVENT_DEDUP_EXPIRE_MS) {
             memset(slot, 0, sizeof(*slot));
+            changed = true;
             continue;
         }
         if (strcmp(slot->key, key) == 0) {
+            if (changed) {
+                event_dedup_mark_dirty();
+            }
             return true;
         }
+    }
+    if (changed) {
+        event_dedup_mark_dirty();
     }
     return false;
 }
@@ -184,11 +341,14 @@ static void event_dedup_mark_seen(const char *key)
         }
         if (t - slot->ts_ms > FEISHU_EVENT_DEDUP_EXPIRE_MS) {
             memset(slot, 0, sizeof(*slot));
+            event_dedup_mark_dirty();
             if (free_idx < 0) free_idx = i;
             continue;
         }
         if (strcmp(slot->key, key) == 0) {
             slot->ts_ms = t;
+            event_dedup_mark_dirty();
+            event_dedup_maybe_flush(false);
             return;
         }
         if (slot->ts_ms < oldest_ts) {
@@ -203,6 +363,8 @@ static void event_dedup_mark_seen(const char *key)
     slot->used = true;
     str_copy(slot->key, sizeof(slot->key), key);
     slot->ts_ms = t;
+    event_dedup_mark_dirty();
+    event_dedup_maybe_flush(false);
 }
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
@@ -1492,6 +1654,7 @@ static void feishu_longconn_task(void *arg)
             }
             if ((loop++ % 10) == 0) {
                 chunk_cache_clear_expired();
+                event_dedup_maybe_flush(false);
             }
         }
 
@@ -1545,6 +1708,18 @@ esp_err_t feishu_bot_init(void)
     } else {
         memset(s_event_dedup, 0, FEISHU_EVENT_DEDUP_MAX * sizeof(event_dedup_t));
     }
+    s_event_dedup_dirty = false;
+    s_event_dedup_dirty_writes = 0;
+    s_event_dedup_last_flush_ms = now_ms();
+    if (s_event_dedup) {
+        esp_err_t load_err = event_dedup_load_from_disk();
+        if (load_err == ESP_OK) {
+            ESP_LOGI(TAG, "Dedup cache loaded from disk (%d entries)", FEISHU_EVENT_DEDUP_MAX);
+        } else if (load_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "Dedup cache load failed: %s", esp_err_to_name(load_err));
+        }
+        event_dedup_maybe_flush(false);
+    }
 
     ESP_LOGI(TAG, "Feishu init: webhook=%s app=%s default_chat=%s",
              s_webhook_url[0] ? "yes" : "no",
@@ -1578,6 +1753,7 @@ esp_err_t feishu_bot_start(void)
 
 esp_err_t feishu_bot_stop(void)
 {
+    event_dedup_maybe_flush(true);
     s_longconn_should_run = false;
     if (s_ws_transport) {
         esp_transport_close(s_ws_transport);
