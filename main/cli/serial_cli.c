@@ -461,7 +461,11 @@ esp_err_t serial_cli_init(void)
     esp_console_dev_usb_serial_jtag_config_t hw_config =
         ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
 
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl));
+    esp_err_t ret = esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "USB Serial JTAG REPL init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     /* Register commands */
     esp_console_register_help_command();
@@ -702,7 +706,11 @@ esp_err_t serial_cli_init(void)
     esp_console_cmd_register(&restart_cmd);
 
     /* Start REPL */
-    ESP_ERROR_CHECK(esp_console_start_repl(repl));
+    ret = esp_console_start_repl(repl);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Serial CLI start failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
     ESP_LOGI(TAG, "Serial CLI started");
 
     return ESP_OK;

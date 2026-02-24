@@ -84,6 +84,16 @@ static void outbound_dispatch_task(void *arg)
     }
 }
 
+static void serial_cli_bootstrap_task(void *arg)
+{
+    (void)arg;
+    esp_err_t cli_err = serial_cli_init();
+    if (cli_err != ESP_OK) {
+        ESP_LOGW(TAG, "Serial CLI init skipped: %s", esp_err_to_name(cli_err));
+    }
+    vTaskDelete(NULL);
+}
+
 void app_main(void)
 {
     /* Silence noisy components */
@@ -116,9 +126,16 @@ void app_main(void)
     ESP_ERROR_CHECK(tool_registry_init());
     ESP_ERROR_CHECK(agent_loop_init());
 
-    /* Start Serial CLI first (works without WiFi) */
-    ESP_ERROR_CHECK(serial_cli_init());
+    /* Start UI early so display init is not blocked by optional CLI backend. */
     ESP_ERROR_CHECK(config_ui_start());
+
+    /* Start Serial CLI in a detached task (non-fatal, non-blocking). */
+    BaseType_t cli_ok = xTaskCreatePinnedToCore(
+        serial_cli_bootstrap_task, "serial_cli_boot",
+        4096, NULL, 3, NULL, 0);
+    if (cli_ok != pdPASS) {
+        ESP_LOGW(TAG, "Serial CLI bootstrap task create failed");
+    }
 
     /* Start WiFi */
     esp_err_t wifi_err = wifi_manager_start();
