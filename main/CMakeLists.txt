@@ -19,6 +19,7 @@ idf_component_register(
         "tools/tool_web_fetch.c"
         "tools/tool_get_time.c"
         "tools/tool_files.c"
+        "audio/audio_service.c"
         "ui/display_port.c"
         "ui/xpt2046.c"
         "ui/config_ui.c"
@@ -27,5 +28,7 @@ idf_component_register(
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_http_client esp_http_server
         esp_https_ota esp_event json spiffs console vfs app_update esp-tls
-        esp_timer esp_driver_gpio esp_driver_spi lvgl_component tcp_transport
+        driver
+        esp_timer esp_driver_gpio esp_driver_spi esp_driver_i2s esp_driver_sdspi
+        fatfs sdmmc lvgl_component tcp_transport
 )

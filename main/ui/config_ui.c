@@ -16,6 +16,7 @@
 #include "proxy/http_proxy.h"
 #include "feishu/feishu_bot.h"
 #include "tools/tool_web_search.h"
+#include "audio/audio_service.h"
 #include "ui/board_config.h"
 #include "ui/display_port.h"
 #include "wifi/wifi_manager.h"
@@ -35,6 +36,7 @@ static lv_obj_t *s_scr_llm = NULL;
 static lv_obj_t *s_scr_feishu = NULL;
 static lv_obj_t *s_scr_search = NULL;
 static lv_obj_t *s_scr_system = NULL;
+static lv_obj_t *s_scr_audio = NULL;
 
 static lv_obj_t *s_home_ip_label = NULL;
 static lv_obj_t *s_home_machine_label = NULL;
@@ -45,6 +47,7 @@ static lv_obj_t *s_status_llm = NULL;
 static lv_obj_t *s_status_feishu = NULL;
 static lv_obj_t *s_status_search = NULL;
 static lv_obj_t *s_status_system = NULL;
+static lv_obj_t *s_status_audio = NULL;
 
 static lv_obj_t *s_form_wifi = NULL;
 static lv_obj_t *s_form_proxy = NULL;
@@ -52,6 +55,7 @@ static lv_obj_t *s_form_llm = NULL;
 static lv_obj_t *s_form_feishu = NULL;
 static lv_obj_t *s_form_search = NULL;
 static lv_obj_t *s_form_system = NULL;
+static lv_obj_t *s_form_audio = NULL;
 
 static lv_obj_t *s_ta_wifi_ssid = NULL;
 static lv_obj_t *s_ta_wifi_pass = NULL;
@@ -63,6 +67,12 @@ static lv_obj_t *s_ta_feishu_app_id = NULL;
 static lv_obj_t *s_ta_feishu_app_secret = NULL;
 static lv_obj_t *s_ta_feishu_chat_id = NULL;
 static lv_obj_t *s_ta_search_key = NULL;
+static lv_obj_t *s_audio_list = NULL;
+static lv_obj_t *s_audio_vol_slider = NULL;
+static lv_obj_t *s_audio_vol_label = NULL;
+
+static char s_audio_files[AUDIO_SERVICE_MAX_FILES][AUDIO_SERVICE_MAX_NAME_LEN];
+static size_t s_audio_file_count = 0;
 
 #define UI_MARGIN               6
 #define HOME_TOP_Y              4
@@ -92,6 +102,17 @@ static void open_llm(void);
 static void open_feishu(void);
 static void open_search(void);
 static void open_system(void);
+static void open_audio(void);
+static void audio_list_item_cb(lv_obj_t *btn, lv_event_t event);
+static void audio_vol_slider_cb(lv_obj_t *obj, lv_event_t event);
+
+static void audio_update_volume_label(int vol_percent)
+{
+    if (!s_audio_vol_label) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Play Vol: %d%%", vol_percent);
+    lv_label_set_text(s_audio_vol_label, buf);
+}
 
 static void ui_set_status(const char *msg)
 {
@@ -414,6 +435,107 @@ static void search_save_cb(lv_obj_t *btn, lv_event_t event)
     ui_set_status(ret == ESP_OK ? "Search key saved" : "Save search key failed");
 }
 
+static void audio_refresh_file_list(void)
+{
+    if (!s_audio_list) return;
+
+    s_audio_file_count = 0;
+    lv_list_clean(s_audio_list);
+
+    esp_err_t ret = audio_service_list_files(s_audio_files, AUDIO_SERVICE_MAX_FILES, &s_audio_file_count);
+    if (ret != ESP_OK) {
+        ui_set_status("SD not ready or no card");
+        return;
+    }
+
+    if (s_audio_file_count == 0) {
+        lv_list_add_btn(s_audio_list, NULL, "(No WAV files)");
+        ui_set_status("Audio folder empty");
+        return;
+    }
+
+    for (size_t i = 0; i < s_audio_file_count; i++) {
+        lv_obj_t *btn = lv_list_add_btn(s_audio_list, NULL, s_audio_files[i]);
+        lv_obj_set_event_cb(btn, audio_list_item_cb);
+    }
+    ui_set_status("File list refreshed");
+}
+
+static void audio_list_item_cb(lv_obj_t *btn, lv_event_t event)
+{
+    if (event != LV_EVENT_CLICKED) return;
+
+    const char *name = lv_list_get_btn_text(btn);
+    if (!name || name[0] == '\0' || name[0] == '(') {
+        return;
+    }
+
+    char path[128];
+    snprintf(path, sizeof(path), "/sdcard/%s", name);
+    esp_err_t ret = audio_service_play_file(path);
+    if (ret == ESP_OK) {
+        ui_set_status("Playing...");
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        ui_set_status("Audio busy (recording/playing)");
+    } else {
+        ui_set_status("Play failed");
+    }
+}
+
+static void audio_start_rec_cb(lv_obj_t *btn, lv_event_t event)
+{
+    (void)btn;
+    if (event != LV_EVENT_CLICKED) return;
+
+    char path[128];
+    esp_err_t ret = audio_service_start_recording(path, sizeof(path));
+    if (ret == ESP_OK) {
+        ui_set_status("Recording...");
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        ui_set_status("Audio busy (recording/playing)");
+    } else {
+        ui_set_status("Start record failed");
+    }
+}
+
+static void audio_stop_rec_cb(lv_obj_t *btn, lv_event_t event)
+{
+    (void)btn;
+    if (event != LV_EVENT_CLICKED) return;
+
+    esp_err_t ret = audio_service_stop_recording();
+    if (ret == ESP_OK) {
+        ui_set_status("Recording saved");
+        audio_refresh_file_list();
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        ui_set_status("Not recording");
+    } else {
+        ui_set_status("Stop record timeout/fail");
+    }
+}
+
+static void audio_refresh_cb(lv_obj_t *btn, lv_event_t event)
+{
+    (void)btn;
+    if (event != LV_EVENT_CLICKED) return;
+    audio_refresh_file_list();
+}
+
+static void audio_vol_slider_cb(lv_obj_t *obj, lv_event_t event)
+{
+    if (event != LV_EVENT_VALUE_CHANGED) return;
+    int vol = lv_slider_get_value(obj);
+    if (audio_service_set_playback_volume_percent(vol) == ESP_OK) {
+        audio_update_volume_label(vol);
+    }
+}
+
+static void system_audio_cb(lv_obj_t *btn, lv_event_t event)
+{
+    (void)btn;
+    if (event == LV_EVENT_CLICKED) open_audio();
+}
+
 static void restart_cb(lv_obj_t *btn, lv_event_t event)
 {
     (void)btn;
@@ -482,6 +604,7 @@ static void home_llm_cb(lv_obj_t *obj, lv_event_t event)    { (void)obj; if (eve
 static void home_feishu_cb(lv_obj_t *obj, lv_event_t event) { (void)obj; if (event == LV_EVENT_CLICKED) open_feishu(); }
 static void home_search_cb(lv_obj_t *obj, lv_event_t event) { (void)obj; if (event == LV_EVENT_CLICKED) open_search(); }
 static void home_sys_cb(lv_obj_t *obj, lv_event_t event)    { (void)obj; if (event == LV_EVENT_CLICKED) open_system(); }
+static void home_audio_cb(lv_obj_t *obj, lv_event_t event)  { (void)obj; if (event == LV_EVENT_CLICKED) open_audio(); }
 
 static void create_home_screen(void)
 {
@@ -511,6 +634,14 @@ static void create_home_screen(void)
     s_home_machine_label = lv_label_create(s_scr_home, NULL);
     lv_label_set_text(s_home_machine_label, "Machine: RUNNING");
     lv_obj_align(s_home_machine_label, NULL, LV_ALIGN_IN_BOTTOM_LEFT, UI_MARGIN, -4);
+
+    lv_obj_t *btn_audio = lv_btn_create(s_scr_home, NULL);
+    lv_obj_set_size(btn_audio, 72, 24);
+    lv_obj_align(btn_audio, NULL, LV_ALIGN_IN_TOP_RIGHT, -UI_MARGIN, 4);
+    lv_obj_set_event_cb(btn_audio, home_audio_cb);
+
+    lv_obj_t *lbl_audio = lv_label_create(btn_audio, NULL);
+    lv_label_set_text(lbl_audio, "Audio");
 }
 
 static void create_wifi_screen(void)
@@ -570,6 +701,42 @@ static void create_system_screen(void)
     lv_obj_align(tip, NULL, LV_ALIGN_IN_TOP_LEFT, UI_MARGIN, UI_MARGIN + 6);
 
     create_action_btn(s_form_system, "Restart Device", UI_MARGIN, 78, 130, restart_cb);
+    create_action_btn(s_form_system, "Audio Panel", UI_MARGIN + 140, 78, 120, system_audio_cb);
+}
+
+static void create_audio_screen(void)
+{
+    s_scr_audio = create_subscreen(&s_status_audio, &s_form_audio);
+
+    lv_obj_t *tip = lv_label_create(s_form_audio, NULL);
+    lv_label_set_text(tip, "Record to SD and tap file to play");
+    lv_obj_align(tip, NULL, LV_ALIGN_IN_TOP_LEFT, UI_MARGIN, UI_MARGIN);
+
+    s_audio_vol_label = lv_label_create(s_form_audio, NULL);
+    lv_obj_align(s_audio_vol_label, NULL, LV_ALIGN_IN_TOP_LEFT, UI_MARGIN, UI_MARGIN + 18);
+
+    s_audio_vol_slider = lv_slider_create(s_form_audio, NULL);
+    lv_obj_set_width(s_audio_vol_slider, SUB_FIELD_W);
+    lv_obj_align(s_audio_vol_slider, NULL, LV_ALIGN_IN_TOP_LEFT, UI_MARGIN, UI_MARGIN + 34);
+    lv_slider_set_range(s_audio_vol_slider, 5, 100);
+    lv_obj_set_event_cb(s_audio_vol_slider, audio_vol_slider_cb);
+    int vol = audio_service_get_playback_volume_percent();
+    if (vol < 5) vol = 5;
+    if (vol > 100) vol = 100;
+    lv_slider_set_value(s_audio_vol_slider, vol, LV_ANIM_OFF);
+    audio_update_volume_label(vol);
+
+    int y = UI_MARGIN + 56;
+    create_action_btn(s_form_audio, "Start Rec", UI_MARGIN, y, 92, audio_start_rec_cb);
+    create_action_btn(s_form_audio, "Stop Rec", UI_MARGIN + 98, y, 92, audio_stop_rec_cb);
+    create_action_btn(s_form_audio, "Refresh", UI_MARGIN + 196, y, 92, audio_refresh_cb);
+
+    s_audio_list = lv_list_create(s_form_audio, NULL);
+    lv_obj_set_size(s_audio_list, SUB_FIELD_W, 116);
+    lv_obj_align(s_audio_list, NULL, LV_ALIGN_IN_TOP_LEFT, UI_MARGIN, y + 36);
+    lv_list_set_layout(s_audio_list, LV_LAYOUT_COLUMN_LEFT);
+
+    audio_refresh_file_list();
 }
 
 static void create_ui(void)
@@ -581,6 +748,7 @@ static void create_ui(void)
     create_feishu_screen();
     create_search_screen();
     create_system_screen();
+    create_audio_screen();
     load_values_to_widgets();
 }
 
@@ -596,6 +764,18 @@ static void open_llm(void)    { show_screen(s_scr_llm, s_status_llm, s_form_llm)
 static void open_feishu(void) { show_screen(s_scr_feishu, s_status_feishu, s_form_feishu); }
 static void open_search(void) { show_screen(s_scr_search, s_status_search, s_form_search); }
 static void open_system(void) { show_screen(s_scr_system, s_status_system, s_form_system); }
+static void open_audio(void)
+{
+    show_screen(s_scr_audio, s_status_audio, s_form_audio);
+    if (s_audio_vol_slider) {
+        int vol = audio_service_get_playback_volume_percent();
+        if (vol < 5) vol = 5;
+        if (vol > 100) vol = 100;
+        lv_slider_set_value(s_audio_vol_slider, vol, LV_ANIM_OFF);
+        audio_update_volume_label(vol);
+    }
+    audio_refresh_file_list();
+}
 
 static void config_ui_task(void *arg)
 {
